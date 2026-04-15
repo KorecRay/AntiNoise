@@ -6,32 +6,49 @@ from dataset import VocalSeparationDataset
 from model import SpectrogramUNet
 from tqdm import tqdm
 
-def train(data_dir, epochs=5, batch_size=16, lr=1e-3):
-    # 強制檢查 CUDA 兼容性或退回 CPU
+def train(data_dir, noise_dir=None, augment=False, epochs=50, batch_size=16, lr=1e-3, save_name="unet_vocal_separator"):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Initial device check: {device}")
     
-    # 建立模型測試 GPU 兼容性
     model = SpectrogramUNet()
     try:
         model = model.to(device)
-        # 測試一個小運算來確保顯卡真的能跑 (針對 RTX 50 系列的特殊保護)
         if device.type == 'cuda':
             dummy = torch.randn(1, 1, 64, 64).to(device)
             _ = model(dummy)
     except Exception as e:
-        print(f"⚠️ GPU 暫不支援您的顯卡架構 (sm_120)，已自動退回到 CPU 模式以確保運行。\n錯誤訊息: {e}")
+        print(f"⚠️ GPU 暫不支援，已自動退回到 CPU。錯誤: {e}")
         device = torch.device('cpu')
         model = model.to(device)
 
     print(f"Training using device: {device}")
 
-    criterion = nn.L1Loss() # Mean Absolute Error on spectrograms often yields less artifacts
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.L1Loss()
+    # 加入 weight_decay 減少過擬合
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    
+    # [核心升級] 學習率排程：若 5 輪 Loss 沒降，則將學習率除以 2
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+    # 模型路徑邏輯
+    os.makedirs("models", exist_ok=True)
+    save_path = f"models/{save_name}.pth"
+    
+    if os.path.exists(save_path):
+        print(f"--- 偵測到既有模型權重：{save_name}.pth ---")
+        choice = input(">>> 想要 [R]繼續訓練 (Resume) 還是 [O]重新訓練並覆蓋 (Overwrite)? [R/O]: ").strip().lower()
+        if choice == 'r':
+            try:
+                model.load_state_dict(torch.load(save_path, map_location=device))
+                print(">>> 已載入舊權重")
+            except Exception as e:
+                print(f">>> 載入失敗，將重新開始。原因: {e}")
+        else:
+            print(">>> 已選擇重新訓練，將覆蓋舊檔案。")
     
     # Load Dataset
     print(f"Loading dataset from: {data_dir}")
-    dataset = VocalSeparationDataset(data_dir)
+    dataset = VocalSeparationDataset(data_dir, noise_dir=noise_dir, augment=augment)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     
     print(f"Found {len(dataset)} training samples. Starting epochs...")
@@ -39,39 +56,60 @@ def train(data_dir, epochs=5, batch_size=16, lr=1e-3):
         model.train()
         epoch_loss = 0
         
+        # 顯示當前學習率以便觀察
+        current_lr = optimizer.param_groups[0]['lr']
         pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, (mix, vocal) in pbar:
             mix, vocal = mix.to(device), vocal.to(device)
             
             optimizer.zero_grad()
             
-            # Predict the mask and apply it to the mixed magnitude
             predicted_mask = model(mix)
             pred_vocal = mix * predicted_mask
             
-            # Loss is calculated against the ground truth vocal spectrogram
             loss = criterion(pred_vocal, vocal)
-            
             loss.backward()
-            optimizer.step()
             
+            # 梯度裁剪防止爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
             epoch_loss += loss.item()
             
-            # Update progress bar
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            pbar.set_postfix({'loss': f"{loss.item():.4f}", 'lr': f"{current_lr:.6f}"})
             
         avg_loss = epoch_loss / len(dataloader)
-        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
+        
+        # 更新排程器
+        scheduler.step(avg_loss)
+        
+        print(f"Epoch [{epoch+1}/{epochs}], Avg Loss: {avg_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
         
     # Save Model Weights
-    os.makedirs("../models", exist_ok=True)
-    save_path = "../models/unet_vocal_separator.pth"
+    os.makedirs("models", exist_ok=True)
+    save_path = f"models/{save_name}.pth"
     torch.save(model.state_dict(), save_path)
     print(f"Training complete. Weights saved to {save_path}")
 
 if __name__ == "__main__":
-    # Change data_dir to match absolute or relative path
-    # Assuming this script is run from inside the src/ folder
-    # 為了成果報告快速產出，我們預設跑 5 個 Epoch 即可
-    train("../data", epochs=5)
+    import argparse
+    parser = argparse.ArgumentParser(description="Train U-Net Vocal Separator")
+    parser.add_argument("--data_dir", type=str, default="../data", help="Path to data directory")
+    parser.add_argument("--noise_dir", type=str, default=None, help="Optional noise directory")
+    parser.add_argument("--augment", action="store_true", help="Enable SpecAugment")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
+    
+    parser.add_argument("--save_name", type=str, default="unet_vocal_separator", help="Name of the model file")
+    
+    args = parser.parse_args()
+    
+    train(
+        data_dir=args.data_dir,
+        noise_dir=args.noise_dir,
+        augment=args.augment,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        save_name=args.save_name
+    )
 

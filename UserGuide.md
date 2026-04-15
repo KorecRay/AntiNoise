@@ -1,78 +1,70 @@
-# 🎤 Vocal Separation AI 專案使用指南
+# AI 音訊聲源分離系統：使用指南 (User Guide)
 
-本專案是一個基於 **STFT U-Net** 架構的人聲分離 AI，專門設計於本機端執行（支援 NVIDIA RTX 50 系列顯卡 GPU 加速）。
-
----
-
-## 階段一：環境配置
-
-發揮 **RTX 50架構** 算力，請使用 Python 3.12 與虛擬環境 (不穩定)：
-
-1. **建立虛擬環境**：
-   ```powershell
-   python -m venv venv
-   ```
-2. **安裝 GPU 版 PyTorch (Nightly 版本以支援最新架構)**：
-   ```powershell
-   .\venv\Scripts\python.exe -m pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu124
-   ```
-3. **安裝其餘相依套件**：
-   ```powershell
-   .\venv\Scripts\python.exe -m pip install librosa numpy scipy soundfile tqdm matplotlib
-   ```
-*** 若不支援 sm120 會自動退回至 CPU 運行***
+本專案提供一套基於 U-Net 與 SpecAugment 技術的聲源分離解決方案。支援高效能 NVIDIA GPU 加速，特別針對 **Blackwell 架構 (RTX 50 系列)** 進行優化。
 
 ---
 
-## 階段二：資料準備
+## 快速環境配置
 
-在訓練之前，我們需要 1,000 筆訓練樣本。我們使用自動合成腳本來產生對照組：
+### 1. 建立虛擬環境 (建議使用 Python 3.12)
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
+```
 
-*   **執行指令**：
-    ```powershell
-    cd src
-    ..\venv\Scripts\python.exe generate_procedural_data.py
-    ```
-*   **說明**：此腳本會在 `data/mix` 與 `data/vocals` 資料夾中產生 1,000 個配對的音訊檔。
+### 2. 安裝核心依賴 (針對 RTX 5080 / Blackwell GPU)
+由於 RTX 50 系列採用 sm_120 架構，請務必安裝以下 Nightly 版本以獲得硬體加速支援 (已實機測試通過)：
+```powershell
+# 安裝支援 Blackwell 之 PyTorch Nightly (cu128)
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
 
----
-
-## 階段三：模型訓練
-
-這是專案的核心，AI 會學習如何從混音中識別並提取人聲特徵：
-
-*   **執行指令**：
-    ```powershell
-    cd src
-    ..\venv\Scripts\python.exe train.py
-    ```
-*   **重點**：
-    1.  確認出現 `Training using device: cuda`（代表正在使用 GPU）。
-    2.  觀察 `tqdm` 進度條每一輪 (Epoch) 的進度與 `Loss` (誤差值) 的變化。
-*   **輸出位置**：訓練結束後，模型權重會存至 `models/unet_vocal_separator.pth`。
+# 安裝音訊處理與其餘套件
+pip install librosa soundfile tqdm requests
+```
 
 ---
 
-## 階段四：實際使用
+## 資料準備
 
-當模型訓練完成後，您可以拿任何 WAV 檔案來進行實際的人聲分離：
-
-*   **執行指令**：
-    ```powershell
-    # 請回到專案根目錄執行
-    cd d:\Coding\EMER\AI
-    .\venv\Scripts\python.exe separate.py [您的音樂路徑.wav] --output_file separated_vocal.wav
-    ```
-*   **說明**：AI 會讀取模型權重，對您的音樂進行頻譜遮罩 (Soft Masking) 運算，最後導出純淨的人聲檔。
+本系統支援「動態混音」模式。建議將資料放置於 `data/` 目錄：
+- `data/vocals/`: 存放純淨的人聲 WAV 檔案 (推薦使用 LibriSpeech)。
+- `data/noises/`: (選用) 存放真實環境噪音 WAV 檔案 (咖啡廳、風聲、街道音等)。
 
 ---
 
-## 🛠️ 疑難排解 (Troubleshooting)
+## 訓練模型
 
-*   **CUDA Error: no kernel image...**：
-    *   代表您的顯卡太新 (RTX 50 系列)，目前的穩定版 PyTorch 尚未收錄其驅動二進位檔。
-    *   **解決方案**：請務必如階段一所示安裝 `Nightly` 版本。
-*   **ImportError: attempted relative import...**：
-    *   請確保您是在 `src` 目錄內執行腳本，或使用 `python -m src.train` 方式啟動。
+### 基本訓練 (靜態混音)
+```powershell
+python src/train.py --data_dir ../data --epochs 50
+```
+
+### 進階訓練 (動態混音 + 隨機 SNR + SpecAugment)
+**推薦模式**：使用此模式可獲得最強的泛化能力，避免模型「走捷徑」。
+```powershell
+# --noise_dir: 指定真實噪音來源
+# --augment: 開啟頻譜遮蔽增強 (SpecAugment)
+python src/train.py --data_dir ../data --noise_dir ../data/noises --augment --epochs 100
+```
+
+---
+
+## 執行聲源分離 (推論)
+
+輸入一個包含背景音的 WAV 檔案，輸出分離後的人聲：
+```powershell
+python separate.py input_file.wav --output clean_voice.wav --model models/unet_vocal_separator.pth
+```
+
+---
+
+## 硬體相容性檢查
+
+本專案內建 Blackwell (sm_120) 自動相容機制。
+
+若要手動確認 GPU 狀態，可點擊執行：
+```powershell
+python -c "import torch; print(f'GPU Available: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+```
 
 ---
