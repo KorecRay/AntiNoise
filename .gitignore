@@ -1,0 +1,26 @@
+# Reports (Hidden from GitHub)
+report.md
+report_V2.md
+report/
+
+# Data and large files
+data/
+models/
+*.pth
+*.wav
+*.mp3
+*.flac
+*.sh
+*.tar.gz
+
+# Python & Environment
+__pycache__/
+venv*/
+.venv*/
+.env*/
+.ipynb_checkpoints/
+
+# System
+.vscode/
+.idea/
+*.log
